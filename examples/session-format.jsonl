@@ -1,0 +1,7 @@
+{"t":1712345678,"type":"message","agent":"default","role":"user","content":"Hello, can you help me with something?","id":"msg_001"}
+{"t":1712345679,"type":"message","agent":"default","role":"assistant","content":"Of course! I'd be happy to help you. What do you need assistance with?","model":"claude-sonnet-4-20250505","tokens_in":12,"tokens_out":15,"id":"msg_002"}
+{"t":1712345680,"type":"tool_call","agent":"default","tool":"read_file","args":{"path":"./package.json"},"id":"call_001"}
+{"t":1712345681,"type":"tool_result","agent":"default","tool":"read_file","result":{"content":"{\n  \"name\": \"flux-cli\",\n  \"version\": \"0.1.0\"\n}"},"id":"call_001"}
+{"t":1712345682,"type":"message","agent":"default","role":"assistant","content":"I can see you have a project called flux-cli. What would you like to work on?","model":"claude-sonnet-4-20250505","tokens_in":25,"tokens_out":18,"id":"msg_003"}
+{"t":1712345690,"type":"event","agent":"system","event":"agent:thinking","data":{"agent":"default","model":"claude-sonnet-4-20250505"}}
+{"t":1712345695,"type":"checkpoint","agent":"system","session_id":"session_abc123","turn":3,"timestamp":"2025-04-05T12:34:55.000Z"}

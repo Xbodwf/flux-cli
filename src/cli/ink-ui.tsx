@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { render, Text, Box, Static, useInput } from 'ink';
 import type { Instance } from 'ink';
 import { terminalWidth } from './ansi.js';
+import { MarkdownBlock } from '../chat/marked-renderer.js';
+import type { ChatMessage, ToolCallDisplay } from '../chat/chat-types.js';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -10,11 +12,13 @@ export interface StatusBarInfo {
   tokensIn?: number;
   tokensOut?: number;
   agentName?: string;
+  activeAgents?: number;
 }
 
 export type OutputLineType =
   | 'text' | 'empty' | 'header' | 'list' | 'blockquote' | 'separator' | 'table'
-  | 'system' | 'tool_call' | 'tool_result' | 'error' | 'code_block';
+  | 'system' | 'tool_call' | 'tool_result' | 'error' | 'code_block'
+  | 'chat_message';
 
 export interface OutputLine {
   id: number;
@@ -302,6 +306,12 @@ export function OutputLineComponent({ line, detailMode }: {
           detail={detailMode}
         />
       );
+    case 'chat_message': {
+      const msg = line.meta?.chatMessage as ChatMessage | undefined;
+      const allMsgs = line.meta?.allMessages as ChatMessage[] | undefined;
+      if (!msg) return null;
+      return <ChatMessageComponent message={msg} allMessages={allMsgs || []} />;
+    }
     case 'error': {
       // Check if it's a rendered error or raw message
       if (line.content.startsWith(' ERROR ')) {
@@ -406,16 +416,161 @@ export function StatusBarComponent({ status }: { status: StatusBarInfo }): React
     ? `in:${status.tokensIn || '?'} out:${status.tokensOut || '?'}`
     : '';
   const agent = status.agentName ? ` [${status.agentName}]` : '';
+  const agentsWorking = status.activeAgents && status.activeAgents > 0
+    ? ` [${status.activeAgents} working]`
+    : '';
   const left = `${status.model}${agent}`;
 
   return (
     <Box>
       <Text dimColor>{left}</Text>
+      {agentsWorking && (
+        <Box marginLeft={1}>
+          <Text bold color="#C586C0">{agentsWorking}</Text>
+        </Box>
+      )}
       {tokens && (
         <Box marginLeft={1}>
           <Text dimColor>{tokens}</Text>
         </Box>
       )}
+    </Box>
+  );
+}
+
+// ─── Tool Call Highlighting ─────────────────────────────────────────
+
+/**
+ * Renders a highlighted tool call with name, args, and optional result.
+ * Uses distinct colors and box styling for visibility.
+ */
+export function ToolCallHighlight({ toolCall }: { toolCall: ToolCallDisplay }): React.JSX.Element {
+  const argsStr = typeof toolCall.args === 'object' && toolCall.args !== null
+    ? Object.entries(toolCall.args as Record<string, unknown>)
+        .map(([k, v]) => `${k}=${typeof v === 'string' && v.length > 40 ? v.slice(0, 40) + '…' : String(v)}`)
+        .join(', ')
+    : String(toolCall.args || '');
+
+  return (
+    <Box flexDirection="column">
+      <Box>
+        <Text bold color="#DCDCAA">⚡ </Text>
+        <Text bold color="#569CD6">{toolCall.name}</Text>
+        <Text dimColor>(</Text>
+        <Text color="#CE9178">{argsStr.length > 60 ? argsStr.slice(0, 60) + '…' : argsStr}</Text>
+        <Text dimColor>)</Text>
+      </Box>
+      {toolCall.result && (
+        <Box marginLeft={2} flexDirection="column">
+          <Box>
+            <Text dimColor>└─ </Text>
+            {toolCall.result.isError
+              ? <Text color="red">error</Text>
+              : <Text color="green">done</Text>
+            }
+            <Text dimColor> ({toolCall.result.content.length} bytes)</Text>
+          </Box>
+          {!toolCall.result.isError && toolCall.result.content && (
+            <Box marginLeft={4}>
+              <Text dimColor italic>{toolCall.result.content.slice(0, 120)}</Text>
+              {toolCall.result.content.length > 120 && <Text dimColor>…</Text>}
+            </Box>
+          )}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+// ─── Quote Thumbnail ────────────────────────────────────────────────
+
+/**
+ * Shows a thumbnail preview of a quoted message.
+ * Renders below the main message content.
+ */
+export function QuoteThumbnail({ message, allMessages }: {
+  message: ChatMessage;
+  allMessages: ChatMessage[];
+}): React.JSX.Element | null {
+  if (message.quotedMessageId === null) return null;
+
+  const quoted = allMessages.find(m => m.id === message.quotedMessageId);
+  if (!quoted) return null;
+
+  const previewText = quoted.content.split('\n').slice(0, 3).join('\n');
+  const maxPreviewLen = 100;
+  const display = previewText.length > maxPreviewLen
+    ? previewText.slice(0, maxPreviewLen) + '…'
+    : previewText;
+
+  return (
+    <Box marginLeft={2} flexDirection="column">
+      <Box>
+        <Text dimColor>{'┌─ '}</Text>
+        <Text dimColor>Reply to msg #{message.quotedMessageId}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>│ </Text>
+        <Text dimColor italic>{display}</Text>
+      </Box>
+      <Text dimColor>{'└' + '─'.repeat(Math.min(terminalWidth() - 4, 40))}</Text>
+    </Box>
+  );
+}
+
+// ─── Chat Message Component ─────────────────────────────────────────
+
+/**
+ * Renders a single ChatMessage (a complete paragraph of AI output or user input).
+ * - Uses marked.js for markdown rendering of complete messages
+ * - Shows quoted message thumbnail if applicable
+ * - Shows tool calls within the message
+ *
+ * agentName is displayed as a prefix so agents in shared context can be distinguished.
+ */
+export function ChatMessageComponent({ message, allMessages }: {
+  message: ChatMessage;
+  allMessages: ChatMessage[];
+}): React.JSX.Element {
+  // Agent display name — uses agentName if available, falls back to agentId
+  const displayName = message.agentName || message.agentId || 'default';
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {/* Role/Agent prefix — always show to distinguish agents in shared context */}
+      <Box>
+        {message.role === 'user' && (
+          <Text bold color="#569CD6">❯ </Text>
+        )}
+        {message.role === 'scanner' && (
+          <Text bold color="#C586C0">[scanner] </Text>
+        )}
+        {message.role === 'system' && (
+          <Text dimColor italic>── </Text>
+        )}
+        {message.role === 'assistant' && (
+          <Text bold color="#4EC9B0">[{displayName}] </Text>
+        )}
+      </Box>
+
+      {/* Content rendered with marked.js */}
+      {message.content && (
+        message.role === 'assistant' || message.role === 'scanner'
+          ? <MarkdownBlock content={message.content} />
+          : <Text wrap="wrap">{message.content}</Text>
+      )}
+
+      {/* Tool calls within this message */}
+      {message.toolCalls.length > 0 && (
+        <Box marginLeft={1} flexDirection="column">
+          {message.toolCalls.map((tc, i) => (
+            <ToolCallHighlight key={tc.id || i} toolCall={tc} />
+          ))}
+        </Box>
+      )}
+
+      {/* Quote thumbnail */}
+      <QuoteThumbnail message={message} allMessages={allMessages} />
     </Box>
   );
 }

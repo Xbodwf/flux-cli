@@ -9,6 +9,7 @@ import {
   ToolResult,
 } from './types.js';
 import { EventBus } from './event-bus.js';
+import { buildSystemPrompt } from './prompt-loader.js';
 import { LLMProvider, ChatOptions } from '../llm/base.js';
 import { ToolRegistry } from '../tools/registry.js';
 
@@ -94,7 +95,7 @@ export class Agent {
     try {
       // Merge system prompt from persona
       const chatOptions: ChatOptions = {
-        system: this.config.persona.prompt,
+        system: buildSystemPrompt(this.config.persona.prompt),
         tools: this.getAvailableTools(),
         maxTokens: this.config.maxTokens,
         temperature: this.config.temperature ?? this.config.persona.temperature,

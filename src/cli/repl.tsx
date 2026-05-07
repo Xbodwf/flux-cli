@@ -7,11 +7,12 @@ import { Agent } from '../core/agent.js';
 import { AgentManager } from '../core/agent-manager.js';
 import { Bridge } from '../core/bridge.js';
 import { ChatOrchestrator } from '../core/orchestrator.js';
-import type { OrchestratorEvent } from '../core/orchestrator.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { handleCommand } from './commands.js';
 import { OutputLineComponent, StatusBarComponent } from './ink-ui.js';
 import type { StatusBarInfo, OutputLine, OutputLineType } from './ink-ui.js';
+import type { ChatMessage, ToolCallDisplay, MessageRole } from '../chat/chat-types.js';
+import { parseQuoteRef } from '../chat/chat-types.js';
 import { ProviderConfigModal, ProviderSwitcher, LanguageSelector } from './provider-ui.js';
 import { t } from '../i18n/index.js';
 import { loadConfig, saveConfig } from '../config/loader.js';
@@ -23,20 +24,35 @@ import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 let _persistedLines: OutputLine[] = [];
 let _persistedNextId = 0;
 let _persistedDetailMode = false;
+let _persistedChatMessages: ChatMessage[] = [];
+let _persistedNextChatId = 0;
 let _currentSessionPath: string | null = null;
 let _initialSessionRendered = false;
 
-function persistState(lines: OutputLine[], nextId: number, detailMode: boolean): void {
+function persistState(
+  lines: OutputLine[], chatMessages: ChatMessage[],
+  nextId: number, detailMode: boolean, nextChatId: number,
+): void {
   _persistedLines = lines;
+  _persistedChatMessages = chatMessages;
   _persistedNextId = nextId;
   _persistedDetailMode = detailMode;
+  _persistedNextChatId = nextChatId;
 }
 
-function restoreState(): { lines: OutputLine[]; nextId: number; detailMode: boolean } {
-  const s = { lines: _persistedLines, nextId: _persistedNextId, detailMode: _persistedDetailMode };
+function restoreState() {
+  const s = {
+    lines: _persistedLines,
+    chatMessages: _persistedChatMessages,
+    nextId: _persistedNextId,
+    detailMode: _persistedDetailMode,
+    nextChatId: _persistedNextChatId,
+  };
   _persistedLines = [];
   _persistedNextId = 0;
   _persistedDetailMode = false;
+  _persistedChatMessages = [];
+  _persistedNextChatId = 0;
   return s;
 }
 
@@ -64,9 +80,11 @@ function ReplApp({
 
   // ─── Rendering state ──────────────────────────────────────────
   const [lines, setLines] = useState<OutputLine[]>(restored.current.lines);
+  const chatMessagesRef = useRef<ChatMessage[]>(restored.current.chatMessages);
   const [input, setInput] = useState('');
   const [processing, setProcessing] = useState(false);
   const [spinnerText, setSpinnerText] = useState<string | null>(null);
+  const [streamingContent, setStreamingContent] = useState<string>('');
   const [statusInfo, setStatusInfo] = useState<StatusBarInfo | null>({
     model: agent.getState().config.model,
     agentName: agent.name,
@@ -78,14 +96,17 @@ function ReplApp({
 
   // Refs for mutable state that should not trigger re-renders
   const nextIdRef = useRef(restored.current.nextId);
+  const nextChatIdRef = useRef(restored.current.nextChatId);
   const abortRef = useRef<AbortController | null>(null);
   const isCleaningUpRef = useRef(false);
   const inputBufferRef = useRef<string[]>([]);
   const inMultiLineRef = useRef(false);
-  const currentSpeakerIdRef = useRef<string | null>(null);
   const processingRef = useRef(false);
   const lastInputTimeRef = useRef(0);
-  const pasteLineBufferRef = useRef<string[]>([]);
+
+  // Real-time chat refs
+  const isGeneratingRef = useRef(false);
+  const userMessageQueueRef = useRef<string[]>([]);
 
   // Code block state machine for line rendering
   const inCodeBlockRef = useRef(false);
@@ -102,7 +123,10 @@ function ReplApp({
   // ─── Persist state on unmount ─────────────────────────────────
   useEffect(() => {
     return () => {
-      persistState(linesRef.current, nextIdRef.current, detailModeRef.current);
+	    persistState(
+	      linesRef.current, chatMessagesRef.current,
+	      nextIdRef.current, detailModeRef.current, nextChatIdRef.current,
+	    );
     };
   }, []);
 
@@ -116,15 +140,11 @@ function ReplApp({
     const timer = setTimeout(() => {
       for (const entry of sessionEntries) {
         if (entry.type === 'message') {
+          const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content);
           if (entry.role === 'user') {
-            const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content);
-            addLine('system', `\u276f ${content}`);
+            addChatMessage('user', content, 'user', undefined, [], null);
           } else if (entry.role === 'assistant') {
-            const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content);
-            const lines = content.split('\n');
-            for (const line of lines) {
-              processLine(line);
-            }
+            addChatMessage('assistant', content, entry.agentId || 'assistant', undefined, [], null);
           }
         } else if (entry.type === 'system_event') {
           if (entry.event !== 'scanner_routing') {
@@ -157,6 +177,61 @@ function ReplApp({
     }, interval * 1000);
 
     return () => clearInterval(timer);
+  }, [agentManager]);
+
+  // ─── Chat message management ──────────────────────────────────
+  const addChatMessage = useCallback((
+    role: MessageRole,
+    content: string,
+    agentId?: string,
+    agentName?: string,
+    toolCalls: ToolCallDisplay[] = [],
+    quotedMessageId: number | null = null,
+    isStreaming = false,
+  ) => {
+    const id = nextChatIdRef.current;
+    nextChatIdRef.current += 1;
+    const msg: ChatMessage = {
+      id,
+      role,
+      agentId,
+      agentName,
+      content,
+      quotedMessageId,
+      timestamp: Date.now(),
+      toolCalls,
+      isStreaming,
+    };
+    // Keep chatMessagesRef in sync for quote lookups
+    chatMessagesRef.current = [...chatMessagesRef.current, msg];
+    // Add as chat_message line (single Static approach)
+    const lineId = nextIdRef.current;
+    nextIdRef.current += 1;
+    setLines(prev => [...prev, {
+      id: lineId,
+      type: 'chat_message' as OutputLineType,
+      content,
+      meta: { chatMessage: msg, allMessages: chatMessagesRef.current },
+    }]);
+  }, []);
+
+  // Save user message to agent session
+  const saveUserToSession = useCallback((text: string) => {
+    const defaultAgent = agentManager.getDefaultAgent();
+    if (!defaultAgent) return;
+    defaultAgent.addSessionEntry({
+      t: Date.now(),
+      type: 'message',
+      agentId: defaultAgent.id,
+      role: 'user',
+      content: text,
+    });
+  }, [agentManager]);
+
+  // Resolve agent name from agent ID
+  const resolveAgentName = useCallback((agentId: string): string | undefined => {
+    const a = agentManager.getAgent(agentId);
+    return a?.name || a?.config?.alias || undefined;
   }, [agentManager]);
 
   // ─── Line management ──────────────────────────────────────────
@@ -208,90 +283,193 @@ function ReplApp({
     }
   }, [addLine]);
 
-  const appendDelta = useCallback((delta: string) => {
-    const parts = delta.split('\n');
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i]!;
-      if (i < parts.length - 1) {
-        const completeLine = pendingPartialRef.current + part;
-        pendingPartialRef.current = '';
-        processLine(completeLine);
-      } else {
-        pendingPartialRef.current += part;
-      }
-    }
-  }, [processLine]);
-
-  const flushOutput = useCallback(() => {
-    if (pendingPartialRef.current) {
-      processLine(pendingPartialRef.current);
-      pendingPartialRef.current = '';
-    }
-  }, [processLine]);
-
   // ─── Update status bar ────────────────────────────────────────
   const refreshStatus = useCallback(() => {
     const agentState = agent.getState();
     setStatusInfo({
       model: agentState.config.model,
       agentName: agent.name,
+      activeAgents: agentManager.getActiveAgentCount(),
     });
-  }, [agent]);
+  }, [agent, agentManager]);
 
   // ─── Process user input via orchestrator ──────────────────────
   const processUserInput = useCallback(async (inputText: string): Promise<void> => {
     refreshStatus();
+    isGeneratingRef.current = true;
 
-    setSpinnerText(t('repl.thinking'));
+    // Episode-local state for this generation run (reset each call)
+    let paragraphBuf = '';
+    let currentAgentId = 'default';
+    let currentAgentName: string | undefined;
+    let currentToolCalls: ToolCallDisplay[] = [];
 
     const abortController = new AbortController();
     abortRef.current = abortController;
-    currentSpeakerIdRef.current = null;
+
+    // Helper: flush one complete paragraph as a ChatMessage
+    const scannerId = orchestrator.getScannerAgent()?.id;
+    const flushParagraph = (text: string) => {
+      if (!text.trim() && currentToolCalls.length === 0) return;
+      // Skip displaying scanner text output — routing events show delegation
+      if (currentAgentId === scannerId && scannerId) {
+        currentToolCalls = [];
+        return;
+      }
+      addChatMessage(
+        'assistant', text,
+        currentAgentId, currentAgentName || resolveAgentName(currentAgentId),
+        [...currentToolCalls], null, false,
+      );
+      // Save assistant message to agent session
+      saveAssistantToSession(text);
+      currentToolCalls = [];
+    };
+
+    // Helper: save assistant paragraph to agent session for context continuity
+    const saveAssistantToSession = (text: string) => {
+      if (!text.trim()) return;
+      const defaultAgent = agentManager.getDefaultAgent();
+      if (!defaultAgent) return;
+      defaultAgent.addSessionEntry({
+        t: Date.now(),
+        type: 'message',
+        agentId: currentAgentId,
+        role: 'assistant',
+        content: text,
+      });
+    };
+
+    // Helper: save user messages to agent session
+    const saveUserToSession = (text: string) => {
+      const defaultAgent = agentManager.getDefaultAgent();
+      if (!defaultAgent) return;
+      defaultAgent.addSessionEntry({
+        t: Date.now(),
+        type: 'message',
+        agentId: defaultAgent.id,
+        role: 'user',
+        content: text,
+      });
+    };
+
+    // Helper: check queue, save to session, abort, and start new generation
+    const handleQueueAndRestart = async (): Promise<boolean> => {
+      const queued = userMessageQueueRef.current;
+      if (queued.length === 0) return false;
+
+      userMessageQueueRef.current = [];
+
+      // Save partial assistant output so LLM has context
+      if (paragraphBuf.trim()) {
+        saveAssistantToSession(paragraphBuf);
+        flushParagraph(paragraphBuf);
+        paragraphBuf = '';
+      }
+
+      // Save queued user messages to session
+      for (const q of queued) {
+        saveUserToSession(q);
+        addChatMessage('user', q, 'user', undefined, [], null, false);
+      }
+
+      // Abort current orchestrator run
+      abortController.abort();
+
+      // Start new generation with the first queued message
+      const nextInput = queued[0]!;
+      setSpinnerText(t('repl.thinking'));
+      await processUserInput(nextInput);
+      return true;
+    };
 
     try {
       for await (const event of orchestrator.chat(inputText, { signal: abortController.signal })) {
-        // After abort, only show error/stop events (skip residual agent output)
-        if (abortController.signal.aborted && event.type !== 'error' && event.type !== 'stop') continue;
+        if (abortController.signal.aborted) break;
 
         switch (event.type) {
 
           case 'text_delta': {
-            setSpinnerText('');
-            const isNewSpeaker = currentSpeakerIdRef.current !== event.agentId;
-            currentSpeakerIdRef.current = event.agentId;
-            const prefix = isNewSpeaker && event.agentId !== 'user'
-              ? `[${event.agentId}] `
-              : '';
-            appendDelta(prefix + event.content);
+            setSpinnerText(null);
+
+            // Track agent identity
+            if (event.agentId) {
+              currentAgentId = event.agentId;
+              currentAgentName = resolveAgentName(event.agentId);
+            }
+
+            // Accumulate into paragraph buffer
+            paragraphBuf += event.content;
+
+            // Show streaming content in real-time (re-renders on every delta)
+            setStreamingContent(paragraphBuf);
+
+            // Detect paragraph boundaries (\n\n) in the stream
+            if (paragraphBuf.includes('\n\n')) {
+              const parts = paragraphBuf.split('\n\n');
+
+              // All parts except the last are complete paragraphs
+              for (let i = 0; i < parts.length - 1; i++) {
+                const complete = parts[i]!;
+                if (complete.trim()) {
+                  flushParagraph(complete);
+                }
+              }
+
+              // Keep the last (potentially incomplete) part as the buffer
+              paragraphBuf = parts[parts.length - 1]!;
+
+              // Update streaming content to reflect the new buffer
+              setStreamingContent(paragraphBuf);
+
+              // After each complete paragraph, check for queued user input
+              const restarted = await handleQueueAndRestart();
+              if (restarted) return;
+            }
             break;
           }
 
           case 'tool_call': {
-            setSpinnerText('');
-            addLine('tool_call', event.toolCall.name, { args: event.toolCall.args });
+            setSpinnerText(null);
+            currentToolCalls.push({
+              id: event.toolCall.id,
+              name: event.toolCall.name,
+              args: event.toolCall.args,
+            });
             break;
           }
 
           case 'tool_result': {
-            const isError = event.toolResult.isError || false;
-            const contentStr = event.toolResult.content
-              .map(c => c.data)
-              .join('\n');
-            addLine('tool_result', event.toolCall, {
-              fullContent: contentStr,
-              isError,
-            });
-            setSpinnerText(t('repl.thinking'));
+            const tc = currentToolCalls.find(t => t.id === event.toolCall);
+            if (tc) {
+              tc.result = {
+                content: event.toolResult.content.map(c => c.data).join('\n'),
+                isError: event.toolResult.isError || false,
+              };
+            }
             break;
           }
 
           case 'routing': {
-            addLine('system', `→ ${event.from} → ${event.to}`);
+            // Show scanner delegation — strip @mentions from task to avoid duplication
+            const cleanTask = event.task.replace(/@\w[\w-]*/g, '').trim();
+            addChatMessage(
+              'scanner',
+              cleanTask ? `→ @${event.to} ${cleanTask}` : `→ @${event.to}`,
+              event.from,
+              resolveAgentName(event.from),
+              [], null, false,
+            );
             break;
           }
 
           case 'stop': {
-            flushOutput();
+            // Flush final paragraph
+            if (paragraphBuf.trim() || currentToolCalls.length > 0) {
+              flushParagraph(paragraphBuf);
+              paragraphBuf = '';
+            }
+            setStreamingContent('');
             refreshStatus();
             break;
           }
@@ -300,9 +478,7 @@ function ReplApp({
             if (abortController.signal.aborted) {
               addLine('system', t('repl.interrupted'));
             } else {
-              const prefix = event.agentId !== 'system'
-                ? `[${event.agentId}] `
-                : '';
+              const prefix = event.agentId !== 'system' ? `[${event.agentId}] ` : '';
               addLine('error', prefix + event.content);
             }
             break;
@@ -310,15 +486,34 @@ function ReplApp({
         }
       }
     } catch (err) {
-      if (abortController.signal.aborted) {
-        addLine('system', t('repl.interrupted'));
-      } else {
+      if (!abortController.signal.aborted) {
         addLine('error', err instanceof Error ? err.message : String(err));
       }
     } finally {
+      isGeneratingRef.current = false;
       abortRef.current = null;
+      setProcessing(false);
+      processingRef.current = false;
+
+      // Flush any remaining paragraph buffer
+      if (paragraphBuf.trim() || currentToolCalls.length > 0) {
+        flushParagraph(paragraphBuf);
+        paragraphBuf = '';
+      }
+      setStreamingContent('');
+
+      // Process any queued messages that arrived during/after generation
+      const queued = userMessageQueueRef.current;
+      if (queued.length > 0) {
+        userMessageQueueRef.current = [];
+        const nextInput = queued[0]!;
+        setProcessing(true);
+        processingRef.current = true;
+        isGeneratingRef.current = true;
+        await processUserInput(nextInput);
+      }
     }
-  }, [orchestrator, agent, refreshStatus, appendDelta, addLine, flushOutput]);
+  }, [orchestrator, agent, refreshStatus, addChatMessage, addLine, resolveAgentName, agentManager, setStreamingContent]);
 
   // ─── Slash command handler ────────────────────────────────────
   const handleSlashCommand = useCallback(async (command: string, args: string[]): Promise<void> => {
@@ -351,6 +546,8 @@ function ReplApp({
       case 'clear':
         setLines([]);
         nextIdRef.current = 0;
+        chatMessagesRef.current = [];
+        nextChatIdRef.current = 0;
         pendingPartialRef.current = '';
         inCodeBlockRef.current = false;
         codeBlockLangRef.current = '';
@@ -361,7 +558,6 @@ function ReplApp({
         await requestInteractive(() =>
           handleCommand(['agent'], agentManager, bridge, toolRegistry) as Promise<unknown> as Promise<void>
         );
-        // Re-read after interactive command
         refreshStatus();
         break;
 
@@ -379,7 +575,7 @@ function ReplApp({
           addLine('system', `  ${a.id} ${a.name} [${a.status}]`);
         }
         for (const r of topo.routes) {
-          addLine('system', `  ${r.from} → ${r.to}${r.topic ? ` (topic: ${r.topic})` : ''}`);
+          addLine('system', `  ${r.from} \u2192 ${r.to}${r.topic ? ` (topic: ${r.topic})` : ''}`);
         }
         addLine('system', `  Messages: ${topo.messageCount}`);
         break;
@@ -533,6 +729,22 @@ function ReplApp({
             const msgCount = entries.filter(e => e.type === 'message').length;
             _currentSessionPath = path;
             addLine('system', `Session loaded: ${name} (${msgCount} messages, ${entries.length} entries)`);
+
+            // Render loaded entries into the display
+            for (const entry of entries) {
+              if (entry.type === 'message') {
+                const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content);
+                if (entry.role === 'user') {
+                  addChatMessage('user', content, 'user', undefined, [], null);
+                } else if (entry.role === 'assistant') {
+                  addChatMessage('assistant', content, entry.agentId || 'assistant', undefined, [], null);
+                }
+              } else if (entry.type === 'system_event') {
+                if (entry.event !== 'scanner_routing') {
+                  addLine('system', `[event] ${entry.event}`);
+                }
+              }
+            }
             break;
           }
 
@@ -554,14 +766,13 @@ function ReplApp({
       default:
         addLine('system', `Unknown command: /${command}`);
     }
-  }, [agentManager, bridge, toolRegistry, orchestrator, agent, addLine, refreshStatus, requestInteractive]);
+  }, [agentManager, bridge, toolRegistry, orchestrator, agent, addLine, addChatMessage, refreshStatus, requestInteractive]);
 
   // ─── Cleanup helper ───────────────────────────────────────────
   function cleanup(): void {
     if (isCleaningUpRef.current) return;
     isCleaningUpRef.current = true;
 
-    // Auto-save session on exit
     try {
       const currentAgent = agentManager.getDefaultAgent();
       if (currentAgent && currentAgent.getState().session.length > 0) {
@@ -593,13 +804,14 @@ function ReplApp({
     lastInputTimeRef.current = now;
     const isRapidSequence = timeSinceLastInput < 50 && timeSinceLastInput > 0;
 
-    // Don't process repl input when a modal is active (modal has its own useInput)
+    // Don't process repl input when a modal is active
     if (activeModalRef.current !== 'none') return;
 
-    // Ctrl+C — interrupt if processing, exit if idle
+    // Ctrl+C — interrupt if generating, exit if idle
     if (key.ctrl && (char === 'c' || char === 'C')) {
-      if (processingRef.current) {
+      if (isGeneratingRef.current || processingRef.current) {
         abortRef.current?.abort();
+        isGeneratingRef.current = false;
         setProcessing(false);
         processingRef.current = false;
         addLine('system', t('repl.interrupted'));
@@ -609,16 +821,17 @@ function ReplApp({
       return;
     }
 
-    // Escape during processing — abort
-    if (key.escape && processingRef.current) {
+    // Escape during generation — abort
+    if (key.escape && isGeneratingRef.current) {
       abortRef.current?.abort();
+      isGeneratingRef.current = false;
       setProcessing(false);
       processingRef.current = false;
       addLine('system', t('repl.interrupted'));
       return;
     }
 
-    // Ctrl+O — toggle detail mode for tool results
+    // Ctrl+O — toggle detail mode
     if (key.ctrl && (char === 'o' || char === 'O')) {
       setDetailMode(d => !d);
       return;
@@ -629,10 +842,7 @@ function ReplApp({
       return;
     }
 
-    // Ignore other input while processing
-    if (processingRef.current) return;
-
-    // Enter
+    // ─── Enter key ────────────────────────────────────────────
     if (key.return) {
       const trimmed = input.trim();
 
@@ -640,7 +850,7 @@ function ReplApp({
       if (key.shift) {
         inputBufferRef.current.push(input);
         inMultiLineRef.current = true;
-        addLine('system', `│ ${input}`);
+        addLine('system', `\u2502 ${input}`);
         setInput('');
         return;
       }
@@ -649,21 +859,21 @@ function ReplApp({
       if (isRapidSequence) {
         inputBufferRef.current.push(input);
         inMultiLineRef.current = true;
-        addLine('system', `│ ${input}`);
+        addLine('system', `\u2502 ${input}`);
         setInput('');
         return;
       }
 
-      // In multi-line mode, Enter on non-empty input adds to buffer (like Shift+Enter)
+      // In multi-line mode, Enter on non-empty input adds to buffer
       if (inMultiLineRef.current && trimmed) {
         inputBufferRef.current.push(input);
-        addLine('system', `│ ${input}`);
+        addLine('system', `\u2502 ${input}`);
         setInput('');
         return;
       }
 
-      // Slash commands
-      if (trimmed.startsWith('/') && !inMultiLineRef.current) {
+      // Slash commands (only when not generating)
+      if (trimmed.startsWith('/') && !inMultiLineRef.current && !isGeneratingRef.current) {
         const fullCmd = trimmed.slice(1).trim();
         const parts = fullCmd.split(/\s+/);
         const command = parts[0]!;
@@ -671,7 +881,6 @@ function ReplApp({
 
         setInput('');
 
-        // Modal-based interactive commands
         if (command === 'language' || command === 'lang') {
           setActiveModal('language');
           return;
@@ -701,16 +910,25 @@ function ReplApp({
         const fullInput = inputBufferRef.current.join('\n');
         inputBufferRef.current = [];
         inMultiLineRef.current = false;
-        setProcessing(true);
-        processingRef.current = true;
         setInput('');
-        addLine('system', `❯ ${fullInput}`);
-        addLine('separator', '');
 
-        processUserInput(fullInput).finally(() => {
-          setProcessing(false);
-          processingRef.current = false;
-        });
+        // Parse quote ref
+        const { quoteId, cleanText } = parseQuoteRef(fullInput);
+
+        // Show user message as ChatMessage
+        addChatMessage('user', fullInput, 'user', undefined, [], quoteId, false);
+
+        saveUserToSession(cleanText || fullInput);
+        if (isGeneratingRef.current) {
+          // Queue message during generation
+          const finalText = quoteId !== null ? `>${quoteId} ${cleanText}` : cleanText;
+          userMessageQueueRef.current.push(finalText || cleanText);
+        } else {
+          addLine('separator', '');
+          setProcessing(true);
+          processingRef.current = true;
+          processUserInput(cleanText || fullInput);
+        }
         return;
       }
 
@@ -728,19 +946,28 @@ function ReplApp({
         return;
       }
 
-      // Single line submit
+      // ─── Single line submit ────────────────────────────────
       inputBufferRef.current = [];
       inMultiLineRef.current = false;
-      setProcessing(true);
-      processingRef.current = true;
       setInput('');
-      addLine('system', `❯ ${trimmed}`);
-      addLine('separator', '');
 
-      processUserInput(trimmed).finally(() => {
-        setProcessing(false);
-        processingRef.current = false;
-      });
+      // Parse quote ref from input
+      const { quoteId, cleanText } = parseQuoteRef(trimmed);
+
+      // Show user message as ChatMessage (with quote info)
+      addChatMessage('user', trimmed, 'user', undefined, [], quoteId, false);
+
+      saveUserToSession(cleanText || trimmed);
+      if (isGeneratingRef.current) {
+        // Queue message during generation
+        userMessageQueueRef.current.push(cleanText || trimmed);
+      } else {
+        // Start generation
+        addLine('separator', '');
+        setProcessing(true);
+        processingRef.current = true;
+        processUserInput(cleanText || trimmed);
+      }
       return;
     }
 
@@ -759,32 +986,41 @@ function ReplApp({
   // ─── Render ───────────────────────────────────────────────────
   return (
     <Box flexDirection="column">
-      {/* Persistent output history */}
+      {/* Single Static for all output — chat messages + system lines */}
       <Static items={lines}>
         {(line: OutputLine) => (
           <OutputLineComponent key={line.id} line={line} detailMode={detailMode} />
         )}
       </Static>
 
+      {/* Streaming paragraph — rendered in real-time outside Static */}
+      {streamingContent && (
+        <Box>
+          <Text dimColor>{' │ '}</Text>
+          <Text>{streamingContent}</Text>
+        </Box>
+      )}
+
       {/* Spinner during processing */}
       {processing && spinnerText && (
         <Text dimColor>{spinnerText}</Text>
       )}
 
-      {/* Input prompt when idle */}
-      {!processing && (
-        <Box>
-          <Text bold color="#569CD6">❯ </Text>
-          <Text>{input}</Text>
-        </Box>
-      )}
+      {/* Always-visible input bar */}
+      <Box>
+        <Text bold color="#569CD6">{'\u276f'} </Text>
+        <Text>{input}</Text>
+        {isGeneratingRef.current && (
+          <Text dimColor> ({t('repl.thinking')})</Text>
+        )}
+      </Box>
 
       {/* Status bar */}
       {statusInfo && (
         <StatusBarComponent status={statusInfo} />
       )}
 
-      {/* Active modal overlay */}
+      {/* Active modal overlays */}
       {activeModal === 'provider' && (
         <ProviderConfigModal onDone={(configured: boolean) => {
           setActiveModal('none');
@@ -817,9 +1053,6 @@ function ReplApp({
 
 /**
  * REPL mode — interactive terminal with Ink-based rich UI.
- *
- * Uses a React component tree (Ink) for rendering instead of raw ANSI output.
- * Input is handled by Ink's useInput hook.
  */
 export async function startREPL(
   agentManager: AgentManager,
@@ -838,6 +1071,8 @@ export async function startREPL(
   _persistedLines = [];
   _persistedNextId = 0;
   _persistedDetailMode = false;
+  _persistedChatMessages = [];
+  _persistedNextChatId = 0;
 
   let instance: Instance;
 
@@ -849,7 +1084,6 @@ export async function startREPL(
     try {
       await instance.waitUntilExit();
     } catch { /* Ink unmount cleanup */ }
-    // Reset stdin to non-raw mode so the interactive command can set its own
     if (process.stdin.isTTY && process.stdin.setRawMode) {
       try { process.stdin.setRawMode(false); } catch { /* ignore */ }
     }
@@ -882,7 +1116,7 @@ export async function startREPL(
   // Show initial banner via console (before Ink app renders)
   process.stdout.write('Flux REPL\n');
   process.stdout.write('Type /help for commands\n');
-  process.stdout.write('─'.repeat(Math.min(process.stdout.columns || 60, 60)) + '\n');
+  process.stdout.write('\u2500'.repeat(Math.min(process.stdout.columns || 60, 60)) + '\n');
 
   instance = renderReplApp();
 

@@ -35,20 +35,6 @@ function parseMentions(text: string, agentManager: AgentManager): string[] {
   return Array.from(mentions);
 }
 
-// ─── Default Scanner Prompt ────────────────────────────────────
-
-export const SCANNER_SYSTEM_PROMPT = `You are a task routing agent in a multi-agent system. Your only job is to analyze user requests and delegate them to the appropriate specialist agents using @mentions.
-
-Rules:
-1. Analyze what the user needs
-2. Delegate to the appropriate agent(s) using @name syntax
-3. Provide clear context for each delegated task
-4. You may delegate to multiple agents for complex tasks
-5. Your responses are internal routing instructions — be concise and direct
-6. Always use @mentions to delegate — never try to do the work yourself
-7. Do not mention agents that don't exist in the available agents list
-8. Use @mentions even for follow-up clarifications — never generate code or content yourself`;
-
 // ─── ChatOrchestrator ──────────────────────────────────────────
 
 /**
@@ -139,14 +125,25 @@ export class ChatOrchestrator {
     const agentList = this.buildAgentList();
     const scannerInput = `[Available agents]\n${agentList}\n\n[User request]\n${input}\n\nAnalyze and delegate using @mentions.`;
 
-    // Run scanner chat, collecting output text
-    const scannerOutput = await this.collectAgentOutput(this.scannerAgent, scannerInput, abortSignal);
+    // Run scanner chat, yielding text_delta events for real-time display
+    const message = { role: 'user' as const, content: scannerInput };
+    let scannerOutput = '';
+
+    try {
+      for await (const event of this.scannerAgent.chat([message], { signal: abortSignal })) {
+        if (event.type === 'text_delta') {
+          scannerOutput += event.content;
+          yield { type: 'text_delta', agentId: this.scannerAgent.id, content: event.content };
+        }
+      }
+    } catch {
+      // silent
+    }
 
     // If aborted during scanner output, stop here
     if (abortSignal?.aborted) return;
 
-    // Scanner output is NOT added to visible session (routing only)
-    // But we record it as a system event for traceability
+    // Record scanner routing as system event for traceability
     this.scannerAgent.addSessionEntry({
       t: Date.now(),
       type: 'system_event',
@@ -159,14 +156,12 @@ export class ChatOrchestrator {
     const delegateIds = this.resolveMentions(scannerOutput);
 
     if (delegateIds.length === 0) {
-      // Scanner didn't mention anyone — forward its output as-is
-      yield { type: 'text_delta', agentId: this.scannerAgent.id, content: scannerOutput };
+      // Scanner didn't mention anyone — forward its output as-is (already yielded via text_delta)
       yield { type: 'stop', agentId: this.scannerAgent.id, isScanner: true };
       return;
     }
 
-    // Extract task context for each mentioned agent from scanner output
-    // Simple approach: pass the full scanner output as context
+    // Scanner delegated — stop scanner output and route to mentioned agents
     yield { type: 'stop', agentId: this.scannerAgent.id, isScanner: true };
 
     // Process all mentioned agents in parallel
@@ -241,6 +236,7 @@ export class ChatOrchestrator {
 
   /**
    * Run a single agent's chat and forward all events.
+   * Includes the available agent list so the agent can delegate via @mentions.
    */
   private async *forwardAgentChat(
     agent: Agent,
@@ -248,6 +244,12 @@ export class ChatOrchestrator {
     recordToSession: boolean,
     options?: { signal?: AbortSignal },
   ): AsyncGenerator<OrchestratorEvent> {
+    // Prepend available agent list so any agent can delegate via @mentions
+    const agentList = this.buildAgentList();
+    const enrichedInput = agentList
+      ? `[Available agents]\n${agentList}\n\n${input}`
+      : input;
+
     // Save user message to agent's session if recording
     if (recordToSession) {
       agent.addSessionEntry({
@@ -255,11 +257,11 @@ export class ChatOrchestrator {
         type: 'message',
         agentId: agent.id,
         role: 'user',
-        content: input,
+        content: enrichedInput,
       });
     }
 
-    const message = { role: 'user' as const, content: input };
+    const message = { role: 'user' as const, content: enrichedInput };
     let buffer = '';
 
     try {
@@ -411,12 +413,13 @@ export class ChatOrchestrator {
   private buildAgentList(): string {
     const agents = this.agentManager.listAgents();
     return agents
-      .filter(a => a.id !== this.scannerAgent?.id) // exclude scanner from list
-      .filter(a => a.id !== 'default')             // exclude legacy fallback agent
+      .filter(a => a.id !== this.scannerAgent?.id)
+      .filter(a => a.id !== 'default')
       .map(a => {
+        const desc = a.description ? `: ${a.description}` : '';
         const alias = this.agentManager.getAgent(a.id)?.config?.alias;
         const aliasStr = alias ? ` (alias: @${alias})` : '';
-        return `  @${a.name}${aliasStr} — ${a.model}`;
+        return `  @${a.name}${aliasStr} — ${a.model}${desc}`;
       })
       .join('\n');
   }

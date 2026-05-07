@@ -100,13 +100,14 @@ export class AgentManager {
   /**
    * List all agents.
    */
-  listAgents(): Array<{ id: string; name: string; provider: ProviderType; model: string; status: string }> {
+  listAgents(): Array<{ id: string; name: string; provider: ProviderType; model: string; status: string; description: string }> {
     return Array.from(this.agents.values()).map(a => ({
       id: a.id,
       name: a.name,
       provider: a.config.provider,
       model: a.config.model,
       status: a.status,
+      description: a.config.persona.description || '',
     }));
   }
 
@@ -155,6 +156,13 @@ export class AgentManager {
    */
   isAgentBusy(agentId: string): boolean {
     return this.busyAgents.has(agentId);
+  }
+
+  /**
+   * Get the number of agents currently processing.
+   */
+  getActiveAgentCount(): number {
+    return this.busyAgents.size;
   }
 
   /**

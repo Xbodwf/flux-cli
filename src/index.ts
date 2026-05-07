@@ -11,7 +11,8 @@ import { startREPL } from './cli/repl.js';
 import { handleCommand } from './cli/commands.js';
 import { showProviderConfigUI, hasConfiguredProvider } from './cli/provider-ui.js';
 import { t } from './i18n/index.js';
-import { ChatOrchestrator, SCANNER_SYSTEM_PROMPT } from './core/orchestrator.js';
+import { loadScannerPrompt } from './core/prompt-loader.js';
+import { ChatOrchestrator } from './core/orchestrator.js';
 import type { AgentConfig, CLIOptions } from './core/types.js';
 
 async function main() {
@@ -58,7 +59,7 @@ async function main() {
   const defaultPersona = personas.get('default') || {
     name: 'default',
     description: 'Default general-purpose agent',
-    prompt: 'You are a helpful AI assistant. You can use tools to read and write files, search code, and execute commands.',
+    prompt: 'You are a helpful AI assistant. You can use tools to read and write files, search code, and explore directory structures.',
     temperature: 0.3,
   };
 
@@ -108,62 +109,25 @@ async function main() {
   // Load existing agent configs from ~/.flux/agents/
   const loadedConfigs = await loadAgentConfigs();
 
-  // Default agent definitions (used if no YAML file exists yet)
-  const defaultAgentDefs: Array<{
-    id: string;
-    name: string;
-    alias: string;
-    description: string;
-    prompt: string;
-    tools: string[];
-  }> = [
-    {
-      id: 'coder',
-      name: 'coder',
-      alias: 'c',
-      description: 'Software development specialist',
-      prompt: `You are an expert software engineer. You write clean, efficient, and well-documented code.
-You have access to file system tools and a terminal to read, write, and execute code.
-Always think through the problem before writing code.
-Ask clarifying questions when requirements are ambiguous.`,
-      tools: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'list_dir', 'read_files', 'memory_save', 'memory_search', 'memory_list'],
-    },
-    {
-      id: 'reviewer',
-      name: 'reviewer',
-      alias: 'r',
-      description: 'Code review specialist',
-      prompt: `You are a senior code reviewer. You review code for correctness, performance, security, and best practices.
-You are thorough but constructive. Point out issues and suggest improvements.
-Focus on:
-- Logic errors and edge cases
-- Security vulnerabilities
-- Performance bottlenecks
-- Code style and maintainability
-- Missing error handling`,
-      tools: ['read_file', 'read_files', 'glob', 'grep', 'list_dir', 'memory_search', 'memory_list'],
-    },
-  ];
-
-  // Create default YAML configs if they don't exist, then create agents
-  for (const def of defaultAgentDefs) {
-    if (!loadedConfigs.has(def.name)) {
-      const newConfig: AgentConfig = {
-        id: def.id,
-        name: def.name,
-        alias: def.alias,
-        provider: config.defaultProvider,
-        model: config.defaultModel,
-        persona: {
-          name: def.name,
-          description: def.description,
-          prompt: def.prompt,
-          temperature: 0.3,
-        },
-        tools: def.tools,
-      };
-      await saveAgentConfig(newConfig);
-      loadedConfigs.set(def.name, newConfig);
+  // If no agent YAMLs exist yet (first launch), copy built-in YAMLs to ~/.flux/agents/
+  if (loadedConfigs.size === 0) {
+    const { readFileSync, existsSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const builtinDir = join(dirname(fileURLToPath(import.meta.url)), 'persona', 'builtin');
+    const agentsDir = join((await import('node:os')).homedir(), '.flux', 'agents');
+    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+    for (const file of ['coder.yaml', 'reviewer.yaml']) {
+      const src = join(builtinDir, file);
+      if (existsSync(src)) {
+        writeFileSync(join(agentsDir, file), readFileSync(src, 'utf-8'), 'utf-8');
+      }
+    }
+    // Reload configs after copying
+    const { loadAgentConfigs: reloadConfigs } = await import('./config/loader.js');
+    const freshConfigs = await reloadConfigs();
+    for (const [k, v] of freshConfigs) {
+      loadedConfigs.set(k, v);
     }
   }
 
@@ -181,7 +145,7 @@ Focus on:
     persona: {
       name: 'scanner',
       description: 'Built-in task routing agent',
-      prompt: SCANNER_SYSTEM_PROMPT,
+      prompt: loadScannerPrompt(),
       temperature: 0.2,
     },
     tools: [],

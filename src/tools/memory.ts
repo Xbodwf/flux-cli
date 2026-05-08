@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ToolDefinition, ToolResult } from '../core/types.js';
 
-const MEMORY_DIR = join(homedir(), '.flux', 'memories');
+const MEMORY_DIR = join(homedir(), '.weave', 'memories');
 const MEMORY_FILE = join(MEMORY_DIR, 'memories.jsonl');
 
 interface MemoryEntry {

@@ -3,7 +3,7 @@ import { AgentManager } from '../core/agent-manager.js';
 import { Bridge } from '../core/bridge.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, loadPersonas, saveConfig } from '../config/loader.js';
-import type { AgentConfig, Persona, FluxConfig } from '../core/types.js';
+import type { AgentConfig, Persona, WeaveConfig } from '../core/types.js';
 import { t } from '../i18n/index.js';
 
 /**
@@ -143,7 +143,7 @@ async function handleSessionCommand(
       const path = getSessionPath(name);
       const entries = agent.getState().session;
       await writeSession(path, entries, config.sessionCompression);
-      console.log(chalk.green(`Session saved: ${name} (${entries.length} entries)`));
+      console.log(chalk.green(t('repl.session_saved', { name, n: entries.length })));
       break;
     }
 
@@ -162,7 +162,7 @@ async function handleSessionCommand(
       } else if (existsSync(path + '.gz')) {
         entries = await readSession(path, true);
       } else {
-        console.error(`Session not found: ${name}`);
+        console.error(t('repl.session_not_found', { name }));
         return true;
       }
 
@@ -176,13 +176,13 @@ async function handleSessionCommand(
         agent.setModel(model);
         saveConfig({ defaultModel: model });
       }
-      console.log(chalk.green(`Session loaded: ${name} (${entries.length} entries)`));
+      console.log(chalk.green(t('repl.session_loaded', { name, n: entries.length })));
       break;
     }
 
     case 'export': {
       const name = args[1];
-      if (!name) { console.error('Usage: session export <name>'); return true; }
+      if (!name) { console.error(t('repl.session_usage_export')); return true; }
       const { readSession, getSessionPath } = await import('../session/jsonl.js');
       const { existsSync } = await import('node:fs');
       const config = loadConfig();
@@ -194,13 +194,13 @@ async function handleSessionCommand(
       } else if (existsSync(path + '.gz')) {
         entries = await readSession(path, true);
       } else {
-        console.error(`Session not found: ${name}`);
+        console.error(t('repl.session_not_found', { name }));
         return true;
       }
 
       for (const entry of entries) {
         if (entry.type === 'message' && entry.role && entry.content) {
-          const role = entry.role === 'user' ? '## User' : '## Assistant';
+          const role = entry.role === 'user' ? t('repl.export_role_user') : t('repl.export_role_assistant');
           const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content, null, 2);
           console.log(`\n${role} (${new Date(entry.t).toISOString()}):\n${content}`);
         }
@@ -248,14 +248,14 @@ async function handleConfigCommand(args: string[]): Promise<boolean> {
         console.error(t('cmd.usage_config'));
         return true;
       }
-      saveConfig({ [key]: value } as unknown as Partial<FluxConfig>);
+      saveConfig({ [key]: value } as unknown as Partial<WeaveConfig>);
       console.log(t('cmd.set_config', { key, value }));
       break;
     }
     case 'edit': {
       const { execSync } = await import('node:child_process');
       const editor = process.env.EDITOR || 'nano';
-      execSync(`${editor} ${process.env.HOME}/.flux_conf/config.yaml`, { stdio: 'inherit' });
+      execSync(`${editor} ${process.env.HOME}/.weave/config.yaml`, { stdio: 'inherit' });
       break;
     }
     default:

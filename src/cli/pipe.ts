@@ -1,11 +1,12 @@
 import { AgentManager } from '../core/agent-manager.js';
+import { t } from '../i18n/index.js';
 
 /**
  * Pipe mode — reads from stdin and processes as a query.
  *
  * Usage:
- *   echo "refactor this" | flux
- *   cat main.ts | flux "review this file"
+ *   echo "refactor this" | weave
+ *   cat main.ts | weave "review this file"
  *
  * If an argument is provided, it's prepended to stdin content.
  */
@@ -15,7 +16,7 @@ export async function handlePipe(
 ): Promise<void> {
   const agent = agentManager.getDefaultAgent();
   if (!agent) {
-    console.error('No agent available.');
+    console.error(t('index.no_agent'));
     process.exit(1);
   }
 
@@ -39,10 +40,10 @@ export async function handlePipe(
         break;
       case 'tool_call':
         // In pipe mode, show tool usage on stderr so stdout stays clean
-        process.stderr.write(`\n[using tool: ${event.toolCall?.name}]\n`);
+        process.stderr.write(`\n${t('pipe.tool_call', { name: event.toolCall?.name || '?' })}\n`);
         break;
       case 'error':
-        process.stderr.write(`\n[Error: ${event.content}]\n`);
+        process.stderr.write(`\n${t('pipe.error', { content: event.content })}\n`);
         break;
     }
   }

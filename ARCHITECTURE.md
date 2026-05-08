@@ -1,17 +1,17 @@
-# Flux Architecture
+# Weave Architecture
 
-> Flux — A next-generation AI CLI with multi-agent coordination, model-agnostic design, and session-aware persistence.
+> Weave — A next-generation AI CLI with multi-agent coordination, model-agnostic design, and session-aware persistence.
 
 ## Philosophy
 
 Existing AI CLI tools (Claude Code, Codex, Gemini CLI) follow a **single-agent** pattern:
-one user, one LLM, one conversation. Flux inverts this by treating AI agents as
+one user, one LLM, one conversation. Weave inverts this by treating AI agents as
 **cooperative peers** rather than single chat completions. The core insight:
 
 > **The ceiling of a solo agent is the ceiling of its model. The ceiling of
 > coordinated agents is unbounded.**
 
-Flux is designed from the ground up for **multi-agent coordination**, not just
+Weave is designed from the ground up for **multi-agent coordination**, not just
 multi-turn chat. Different models with different roles run side-by-side,
 communicating through a structured Bridge layer — turning user+AI into
 user+team-of-AIs.
@@ -49,7 +49,7 @@ destroyed at runtime through CLI commands.
 ### 2. Bridge
 
 The coordination bus. The Bridge enables agents to communicate with each other,
-not just with the user. This is Flux's primary innovation over existing tools.
+not just with the user. This is Weave's primary innovation over existing tools.
 
 ```
      ┌──────────┐     ┌──────────┐     ┌──────────┐
@@ -140,10 +140,10 @@ Built-in providers:
 ### 5. Persona System
 
 Each agent has a persona — a structured definition of its role, behavior, and
-constraints. Personas are stored as YAML files in `~/.flux_conf/personas/`.
+constraints. Personas are stored as YAML files in `~/.weave_conf/personas/`.
 
 ```yaml
-# ~/.flux_conf/personas/architect.yaml
+# ~/.weave_conf/personas/architect.yaml
 name: architect
 description: "System architect — designs solutions, produces specs"
 prompt: |
@@ -161,7 +161,7 @@ model_preference: sonnet
 temperature: 0.2
 ```
 
-Built-in personas are shipped with Flux; users can override or add their own.
+Built-in personas are shipped with Weave; users can override or add their own.
 
 ### 6. Session (JSONL Format)
 
@@ -187,10 +187,10 @@ summarization seen in other tools.
 **Resume**: Any session file can be loaded to restore full context, including
 all agent states, tool results, and system events.
 
-### 7. Configuration (`~/.flux_conf/`)
+### 7. Configuration (`~/.weave_conf/`)
 
 ```
-~/.flux_conf/
+~/.weave_conf/
 ├── config.yaml          # Main configuration file
 ├── providers.yaml       # LLM provider settings & API keys
 ├── keys.yaml            # API keys (0600 permissions)
@@ -254,7 +254,7 @@ User Input → CLI Layer → Orchestrator Agent
 ## CLI Design
 
 ```bash
-flux [command] [options] [input]
+weave [command] [options] [input]
 
 Commands:
   (none)      REPL mode — interactive terminal
@@ -283,8 +283,8 @@ Commands:
     status    Show bridge topology
 
 Pipe mode:
-  echo "refactor this" | flux
-  cat main.ts | flux "review this file"
+  echo "refactor this" | weave
+  cat main.ts | weave "review this file"
 ```
 
 ---
@@ -292,12 +292,12 @@ Pipe mode:
 ## Project Structure
 
 ```
-flux/
+weave/
 ├── package.json
 ├── tsconfig.json
 ├── ARCHITECTURE.md
 ├── bin/
-│   └── flux                  # CLI entry point (hashbang)
+│   └── weave                 # CLI entry point (hashbang)
 ├── src/
 │   ├── index.ts              # Main entry
 │   ├── cli/
@@ -325,7 +325,7 @@ flux/
 │   │   ├── search.ts         # Code search (grep/glob)
 │   │   └── mcp.ts            # MCP protocol client
 │   ├── config/
-│   │   ├── loader.ts         # Config loader (~/.flux_conf/)
+│   │   ├── loader.ts         # Config loader (~/.weave_conf/)
 │   │   └── schema.ts         # Config schema and types
 │   ├── persona/
 │   │   ├── manager.ts        # Persona lifecycle
@@ -343,7 +343,7 @@ flux/
 
 ## Tool System (MCP-based)
 
-Tools are the agents' interface to the world. Flux uses the **Model Context
+Tools are the agents' interface to the world. Weave uses the **Model Context
 Protocol (MCP)** for tool definition, allowing both local and remote tools.
 
 ```typescript
@@ -375,8 +375,8 @@ One agent crashing does not bring down the system. The Bridge detects agent
 failures and can spawn replacement agents.
 
 ### Session Checkpointing
-Session is checkpointed after every turn. If Flux crashes, restarting with
-`flux session load` restores full state.
+Session is checkpointed after every turn. If Weave crashes, restarting with
+`weave session load` restores full state.
 
 ### Retry with Fallback Model
 If an agent's primary model fails (rate limit, outage), it can fall back to a
@@ -386,7 +386,7 @@ secondary model transparently.
 
 ## Security Model
 
-1. **API keys** stored in `~/.flux_conf/keys.yaml` with `chmod 0600`
+1. **API keys** stored in `~/.weave_conf/keys.yaml` with `chmod 0600`
 2. **Shell execution** requires user confirmation by default (opt-in to auto)
 3. **File operations** scoped to project directory by default
 4. **Network tools** (`web_fetch`) require explicit enablement
@@ -400,7 +400,7 @@ secondary model transparently.
 - [x] Project scaffolding (package.json, tsconfig)
 - [ ] Core types and event bus
 - [ ] Basic CLI entry (REPL + pipe)
-- [ ] Config loader (~/.flux_conf/)
+- [ ] Config loader (~/.weave_conf/)
 - [ ] JSONL session writer
 - [ ] Single-provider (Anthropic) naive agent loop
 
@@ -442,6 +442,6 @@ secondary model transparently.
 | MCP over custom tool schema | Industry standard, interchangeable with other MCP clients |
 | Event Bus + Bridge as separate layers | Different concerns: system observability vs agent coordination |
 | Provider abstraction from day 1 | Much harder to retrofit; forces clean interfaces |
-| Agent as first-class object | Enables CLI subcommands (`flux agent create`, `flux agent list`) |
+| Agent as first-class object | Enables CLI subcommands (`weave agent create`, `weave agent list`) |
 | Persona as YAML files | Users can edit with any text editor, no DSL to learn |
 | Gzip over custom compression | Ubiquitous, fast, lossless, known tooling |

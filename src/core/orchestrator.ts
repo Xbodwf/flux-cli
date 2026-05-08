@@ -3,6 +3,7 @@ import { AgentManager } from './agent-manager.js';
 import { Bridge } from './bridge.js';
 import type { AgentChatEvent } from './agent.js';
 import type { ToolCall, ToolResult, SessionEntry } from './types.js';
+import type { SessionEntry as SessionEntryType } from './types.js';
 
 // ─── Orchestrator Events ───────────────────────────────────────
 
@@ -46,7 +47,7 @@ function parseMentions(text: string, agentManager: AgentManager): string[] {
  * - Scanner analyzes and delegates via @mentions
  * - Any agent can @mention other agents (recursive delegation)
  * - Same agent: only one concurrent instance (queued if busy)
- * - Scanner messages are internal (not visible in conversation history)
+ * - Scanner messages are internal (not shown to user directly)
  */
 export class ChatOrchestrator {
   private agentManager: AgentManager;
@@ -110,7 +111,8 @@ export class ChatOrchestrator {
 
   /**
    * Process user input through the scanner agent.
-   * Scanner delegates via @mentions in its output.
+   * Scanner output is NOT shown to the user — it's internal routing only.
+   * Only the delegated agents' output is visible.
    */
   private async *processWithScanner(
     input: string,
@@ -125,20 +127,8 @@ export class ChatOrchestrator {
     const agentList = this.buildAgentList();
     const scannerInput = `[Available agents]\n${agentList}\n\n[User request]\n${input}\n\nAnalyze and delegate using @mentions.`;
 
-    // Run scanner chat, yielding text_delta events for real-time display
-    const message = { role: 'user' as const, content: scannerInput };
-    let scannerOutput = '';
-
-    try {
-      for await (const event of this.scannerAgent.chat([message], { signal: abortSignal })) {
-        if (event.type === 'text_delta') {
-          scannerOutput += event.content;
-          yield { type: 'text_delta', agentId: this.scannerAgent.id, content: event.content };
-        }
-      }
-    } catch {
-      // silent
-    }
+    // Collect scanner output silently — do NOT yield text_delta to UI
+    const scannerOutput = await this.collectAgentOutput(this.scannerAgent, scannerInput, abortSignal);
 
     // If aborted during scanner output, stop here
     if (abortSignal?.aborted) return;
@@ -156,15 +146,12 @@ export class ChatOrchestrator {
     const delegateIds = this.resolveMentions(scannerOutput);
 
     if (delegateIds.length === 0) {
-      // Scanner didn't mention anyone — forward its output as-is (already yielded via text_delta)
+      // Scanner didn't mention anyone — no output to show
       yield { type: 'stop', agentId: this.scannerAgent.id, isScanner: true };
       return;
     }
 
-    // Scanner delegated — stop scanner output and route to mentioned agents
-    yield { type: 'stop', agentId: this.scannerAgent.id, isScanner: true };
-
-    // Process all mentioned agents in parallel
+    // Scanner delegated — route to mentioned agents (no scanner stop event shown)
     for (const agentId of delegateIds) {
       yield { type: 'routing', from: this.scannerAgent.id, to: agentId, task: scannerOutput };
     }
@@ -172,7 +159,9 @@ export class ChatOrchestrator {
   }
 
   /**
-   * Process multiple agents in parallel (or sequentially if same-agent constraint).
+   * Process multiple agents in parallel — true concurrency via Promise.race.
+   * Each agent's event stream is interleaved as events arrive.
+   * Agent identity is preserved via event.agentId.
    */
   private async *processAgentsParallel(
     agentIds: string[],
@@ -185,58 +174,106 @@ export class ChatOrchestrator {
       return;
     }
 
-    // For now, process agents sequentially since we need ordered output for the UI.
-    // Each agent acquires a lock so same-agent concurrent calls are queued.
-    for (const agentId of agentIds) {
-      // Stop processing more agents if aborted
-      if (options?.signal?.aborted) return;
+    if (options?.signal?.aborted) return;
 
+    // Resolve agents and extract tasks
+    const agentTasks: Array<{ agent: import('./agent.js').Agent; task: string }> = [];
+    for (const agentId of agentIds) {
       const agent = this.agentManager.getAgent(agentId);
       if (!agent) {
-        yield { type: 'error', agentId: agentId, content: `Agent not found: ${agentId}` };
+        yield { type: 'error', agentId, content: `Agent not found: ${agentId}` };
         continue;
       }
+      const taskText = this.extractTaskForAgent(context, agent);
+      agentTasks.push({ agent, task: taskText });
+    }
 
-      // Wait if this agent is busy (same-agent concurrency guard)
-      await this.agentManager.acquireAgent(agentId);
+    if (agentTasks.length === 0) return;
 
-      try {
-        // Check for sub-mentions in the context — if this agent was mentioned
-        // with a specific task, extract the task text
-        const taskText = this.extractTaskForAgent(context, agent);
+    // Acquire all agents first
+    for (const { agent } of agentTasks) {
+      await this.agentManager.acquireAgent(agent.id);
+    }
 
-        // Run the agent
-        yield* this.forwardAgentChat(agent, taskText, true, options);
+    try {
+      // Create async generators for each agent
+      type GenEntry = { id: string; gen: AsyncGenerator<OrchestratorEvent> };
+      const generators: GenEntry[] = [];
 
-        // Check agent output for further @mentions (agent-to-agent delegation)
-        const recentSession = agent.getState().session;
-        const lastAssistantEntry = [...recentSession].reverse()
-          .find(e => e.type === 'message' && e.role === 'assistant');
-        const agentOutput = lastAssistantEntry?.content
-          ? (typeof lastAssistantEntry.content === 'string'
-            ? lastAssistantEntry.content
-            : JSON.stringify(lastAssistantEntry.content))
-          : '';
+      for (const { agent, task } of agentTasks) {
+        const gen = this.forwardAgentChat(agent, task, true, options);
+        generators.push({ id: agent.id, gen });
+      }
 
-        // Don't recurse into sub-mentions if aborted
-        if (options?.signal?.aborted) return;
+      // Track output text for sub-mention detection
+      const outputTexts = new Map<string, string>();
 
-        const subMentions = this.resolveMentions(agentOutput);
+      // Consume all generators in parallel via Promise.race
+      const abortSignal = options?.signal;
+      let pendings: Array<{
+        id: string;
+        promise: Promise<IteratorResult<OrchestratorEvent, void>>;
+      }> = generators.map(g => ({
+        id: g.id,
+        promise: g.gen.next(),
+      }));
+
+      while (pendings.length > 0) {
+        if (abortSignal?.aborted) break;
+
+        const winner = await Promise.race(
+          pendings.map(p => p.promise.then(result => ({ id: p.id, result }))),
+        );
+
+        if (winner.result.done) {
+          pendings = pendings.filter(p => p.id !== winner.id);
+          continue;
+        }
+
+        const event = winner.result.value;
+
+        // Track text output for each agent
+        if (event.type === 'text_delta') {
+          const prev = outputTexts.get(winner.id) || '';
+          outputTexts.set(winner.id, prev + event.content);
+        }
+
+        yield event;
+
+        // Re-prime the consumed generator
+        const gen = generators.find(g => g.id === winner.id);
+        if (gen) {
+          const idx = pendings.findIndex(p => p.id === winner.id);
+          if (idx !== -1) {
+            pendings[idx] = { id: winner.id, promise: gen.gen.next() };
+          }
+        }
+      }
+
+      // Check each agent's output for further @mentions (agent-to-agent delegation)
+      for (const { agent } of agentTasks) {
+        const text = outputTexts.get(agent.id) || '';
+        if (!text) continue;
+        const subMentions = this.resolveMentions(text);
         if (subMentions.length > 0) {
           for (const subId of subMentions) {
-            yield { type: 'routing', from: agent.id, to: subId, task: agentOutput };
+            yield { type: 'routing', from: agent.id, to: subId, task: text };
           }
-          yield* this.processAgentsParallel(subMentions, agentOutput, depth + 1, options);
+          yield* this.processAgentsParallel(subMentions, text, depth + 1, options);
         }
-      } finally {
-        this.agentManager.markAgentFree(agentId);
+      }
+    } finally {
+      // Release all agents
+      for (const { agent } of agentTasks) {
+        this.agentManager.markAgentFree(agent.id);
       }
     }
   }
 
   /**
    * Run a single agent's chat and forward all events.
-   * Includes the available agent list so the agent can delegate via @mentions.
+   * NOTE: Agent list is NOT prepended here — only the scanner gets the agent list.
+   * Delegated agents receive the task description directly.
    */
   private async *forwardAgentChat(
     agent: Agent,
@@ -244,12 +281,6 @@ export class ChatOrchestrator {
     recordToSession: boolean,
     options?: { signal?: AbortSignal },
   ): AsyncGenerator<OrchestratorEvent> {
-    // Prepend available agent list so any agent can delegate via @mentions
-    const agentList = this.buildAgentList();
-    const enrichedInput = agentList
-      ? `[Available agents]\n${agentList}\n\n${input}`
-      : input;
-
     // Save user message to agent's session if recording
     if (recordToSession) {
       agent.addSessionEntry({
@@ -257,11 +288,11 @@ export class ChatOrchestrator {
         type: 'message',
         agentId: agent.id,
         role: 'user',
-        content: enrichedInput,
+        content: input,
       });
     }
 
-    const message = { role: 'user' as const, content: enrichedInput };
+    const message = { role: 'user' as const, content: input };
     let buffer = '';
 
     try {

@@ -30,11 +30,11 @@ export class AgentManager {
    * Create a new agent.
    */
   async createAgent(config: AgentConfig): Promise<Agent> {
-    const fluxConfig = loadConfig();
+    const weaveConfig = loadConfig();
 
     // Resolve provider config
-    const providerConfig = fluxConfig.providers[config.provider];
-    const model = config.model || providerConfig?.defaultModel || fluxConfig.defaultModel;
+    const providerConfig = weaveConfig.providers[config.provider];
+    const model = config.model || providerConfig?.defaultModel || weaveConfig.defaultModel;
 
     // Create provider
     const provider = createProvider(config.provider, {
@@ -199,6 +199,18 @@ export class AgentManager {
     return new Promise<void>(resolve => {
       this.pendingQueue.push({ agentId, task: 'acquire', resolve });
     });
+  }
+
+  /**
+   * Inject session entries into ALL agents.
+   * Used after session load so every agent has conversation context.
+   */
+  injectSessionToAllAgents(entries: import('./types.js').SessionEntry[]): void {
+    for (const agent of this.agents.values()) {
+      const state = agent.getState();
+      state.session = [...entries];
+      agent.restoreState(state);
+    }
   }
 
   /**

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { SessionEntry } from '../core/types.js';
 
-const SESSION_DIR = join(homedir(), '.flux', 'sessions');
+const SESSION_DIR = join(homedir(), '.weave', 'sessions');
 
 /**
  * JSONL Session — append-only, streaming-friendly, grep-able.

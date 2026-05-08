@@ -1,9 +1,18 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getLocale } from '../i18n/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPT_DIR = join(__dirname, '..', 'static', 'prompts');
+
+/**
+ * Language name mapping for agent prompt injection.
+ */
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
+  zh: 'Chinese',
+};
 
 /**
  * Shared prompt files loaded for all agents.
@@ -23,8 +32,18 @@ function readPromptFile(filename: string): string {
 }
 
 /**
+ * Build a language instruction to inject into the system prompt.
+ * This prevents AI from mixing languages in its responses.
+ */
+function buildLanguageInstruction(): string {
+  const locale = getLocale();
+  const langName = LANGUAGE_NAMES[locale] || 'English';
+  return `## Language\n\nThe user's language is set to: ${langName}. Always respond in ${langName}. Never mix languages in your response.`;
+}
+
+/**
  * Build a complete system prompt by combining shared prompts
- * with an optional agent-specific prompt.
+ * with an optional agent-specific prompt and language instruction.
  *
  * Shared prompts (identity, strategy, security, rules) are loaded from
  * src/static/prompts/ and are prepended before the agent-specific prompt.
@@ -47,6 +66,9 @@ export function buildSystemPrompt(agentPrompt?: string): string {
   if (agentPrompt) {
     parts.push(agentPrompt);
   }
+
+  // Language instruction — prevents mixed-language responses
+  parts.push(buildLanguageInstruction());
 
   if (parts.length === 0) {
     return 'You are a helpful AI assistant. You can use tools to read and write files, search code, and execute commands.';

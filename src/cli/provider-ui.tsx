@@ -25,9 +25,9 @@ const PROVIDERS: ProviderOption[] = [
   { id: 'ollama', name: 'Ollama', needsKey: false, defaultModel: 'llama3', defaultUrl: 'http://localhost:11434' },
 ];
 
-const FLUX_CONF_DIR = join(homedir(), '.flux_conf');
-const KEYS_PATH = join(FLUX_CONF_DIR, 'keys.yaml');
-const PROVIDERS_PATH = join(FLUX_CONF_DIR, 'providers.yaml');
+const WEAVE_DIR = join(homedir(), '.weave');
+const KEYS_PATH = join(WEAVE_DIR, 'keys.yaml');
+const PROVIDERS_PATH = join(WEAVE_DIR, 'providers.yaml');
 
 // ─── Save Config Helpers ────────────────────────────────────────────
 

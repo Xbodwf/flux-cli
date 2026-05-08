@@ -69,7 +69,7 @@ async function main() {
     provider: config.defaultProvider,
     model: options.model || config.defaultModel,
     persona: defaultPersona,
-    tools: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'list_dir', 'read_files', 'memory_save', 'memory_search', 'memory_list'],
+    tools: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'list_dir', 'read_files', 'shell', 'memory_save', 'memory_search', 'memory_list'],
     temperature: defaultPersona.temperature,
   };
 
@@ -95,27 +95,33 @@ async function main() {
           agent.restoreState(state);
           const model = entries.find(e => e.model)?.model;
           if (model) agent.setModel(model);
-          console.log(`Session loaded: ${options.session} (${entries.length} entries)`);
+          console.log(t('repl.session_loaded', { name: options.session!, n: entries.length }));
         }
       }
     } catch (err) {
-      console.error(`Failed to load session: ${err}`);
+      console.error(t('index.failed_load_session', { err: err instanceof Error ? err.message : String(err) }));
     }
   }
 
   // ─── Multi-Agent Orchestrator Setup ──────────────────────────
   const orchestrator = new ChatOrchestrator(agentManager, bridge);
 
-  // Load existing agent configs from ~/.flux/agents/
+  // Propagate loaded session to all agents (they're all created now)
+  const defaultAgent = agentManager.getDefaultAgent();
+  if (defaultAgent && defaultAgent.getState().session.length > 0) {
+    agentManager.injectSessionToAllAgents(defaultAgent.getState().session);
+  }
+
+  // Load existing agent configs from ~/.weave/agents/
   const loadedConfigs = await loadAgentConfigs();
 
-  // If no agent YAMLs exist yet (first launch), copy built-in YAMLs to ~/.flux/agents/
+  // If no agent YAMLs exist yet (first launch), copy built-in YAMLs to ~/.weave/agents/
   if (loadedConfigs.size === 0) {
     const { readFileSync, existsSync, mkdirSync, writeFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const builtinDir = join(dirname(fileURLToPath(import.meta.url)), 'persona', 'builtin');
-    const agentsDir = join((await import('node:os')).homedir(), '.flux', 'agents');
+    const agentsDir = join((await import('node:os')).homedir(), '.weave', 'agents');
     if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
     for (const file of ['coder.yaml', 'reviewer.yaml']) {
       const src = join(builtinDir, file);
@@ -160,6 +166,20 @@ async function main() {
     if (!handled) {
       // Treat as one-shot query if not a known command
       await handleOneShot(args.join(' '), agentManager);
+    }
+
+    // If session was loaded via CLI, propagate to all agents and enter REPL mode
+    // Otherwise (agent list, config, etc.), exit
+    const cmd = args[0]!;
+    if (cmd === 'session' && args[1] === 'load') {
+      // Propagate loaded session to all agents for multi-agent awareness
+      const defAgent = agentManager.getDefaultAgent();
+      if (defAgent && defAgent.getState().session.length > 0) {
+        agentManager.injectSessionToAllAgents(defAgent.getState().session);
+      }
+      await startREPL(agentManager, bridge, tools, orchestrator);
+    } else if (cmd === 'session' && args[1] === 'new') {
+      await startREPL(agentManager, bridge, tools, orchestrator);
     }
     process.exit(0);
   }
@@ -251,9 +271,9 @@ function showHelp(): void {
 ${t('index.help_title')}
 
 ${chalk.bold(t('index.help_usage'))}
-  flux                  ${t('index.help_repl')}
-  flux <query>          ${t('index.help_oneshot')}
-  flux [command]        ${t('index.help_subcommand')}
+  weave                  ${t('index.help_repl')}
+  weave <query>          ${t('index.help_oneshot')}
+  weave [command]        ${t('index.help_subcommand')}
 
 ${chalk.bold(t('index.help_commands_header'))}
   agent                 ${t('index.help_agent')}
@@ -272,15 +292,15 @@ ${chalk.bold(t('index.help_options_header'))}
   --help, -h            ${t('index.help_help')}
 
 ${chalk.bold(t('index.help_pipe'))}
-  echo "refactor this" | flux
-  cat main.ts | flux "${t('index.help_oneshot')}"
+  echo "refactor this" | weave
+  cat main.ts | weave "${t('index.help_oneshot')}"
 
 ${chalk.bold(t('index.help_env'))}
   ANTHROPIC_API_KEY     ${t('index.help_anthropic_key')}
   OPENAI_API_KEY        ${t('index.help_openai_key')}
   GEMINI_API_KEY        ${t('index.help_gemini_key')}
-  FLUX_DEFAULT_MODEL    ${t('index.help_model_opt')}
-  FLUX_DEFAULT_PROVIDER ${t('index.help_provider_opt')}
+  WEAVE_DEFAULT_MODEL    ${t('index.help_model_opt')}
+  WEAVE_DEFAULT_PROVIDER ${t('index.help_provider_opt')}
 
 ${t('index.help_config_path')}
 ${t('index.help_sessions_path')}

@@ -3,41 +3,41 @@ import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, extname } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import type { AgentConfig, FluxConfig, Persona, ProviderConfig, ProviderType } from '../core/types.js';
+import type { AgentConfig, WeaveConfig, Persona, ProviderConfig, ProviderType } from '../core/types.js';
 import { setLocale } from '../i18n/index.js';
 
-const FLUX_CONF_DIR = join(homedir(), '.flux_conf');
-const DEFAULT_SESSION_DIR = join(homedir(), '.flux', 'sessions');
-const AGENTS_DIR = join(homedir(), '.flux', 'agents');
+const WEAVE_CONF_DIR = join(homedir(), '.weave');
+const DEFAULT_SESSION_DIR = join(WEAVE_CONF_DIR, 'sessions');
+const AGENTS_DIR = join(WEAVE_CONF_DIR, 'agents');
 
-const DEFAULT_CONFIG: FluxConfig = {
+const DEFAULT_CONFIG: WeaveConfig = {
   defaultProvider: 'anthropic',
   defaultModel: 'claude-sonnet-4-20250505',
   providers: {},
   sessionDir: DEFAULT_SESSION_DIR,
   sessionCompression: true,
-  personasDir: join(FLUX_CONF_DIR, 'personas'),
+  personasDir: join(WEAVE_CONF_DIR, 'personas'),
   autoSaveInterval: 30,
   shellConfirmRequired: true,
   theme: 'auto',
 };
 
 /**
- * Load configuration from ~/.flux_conf/
+ * Load configuration from ~/.weave/
  *
  * Priority: defaults < config.yaml < environment variables
  */
-export function loadConfig(): FluxConfig {
-  const configPath = join(FLUX_CONF_DIR, 'config.yaml');
-  const providersPath = join(FLUX_CONF_DIR, 'providers.yaml');
-  const keysPath = join(FLUX_CONF_DIR, 'keys.yaml');
+export function loadConfig(): WeaveConfig {
+  const configPath = join(WEAVE_CONF_DIR, 'config.yaml');
+  const providersPath = join(WEAVE_CONF_DIR, 'providers.yaml');
+  const keysPath = join(WEAVE_CONF_DIR, 'keys.yaml');
 
   let config = { ...DEFAULT_CONFIG };
 
   // Load config.yaml
   if (existsSync(configPath)) {
     const raw = readFileSync(configPath, 'utf-8');
-    const parsed = parseYaml(raw) as Partial<FluxConfig>;
+    const parsed = parseYaml(raw) as Partial<WeaveConfig>;
     config = { ...config, ...parsed };
   }
 
@@ -73,11 +73,11 @@ export function loadConfig(): FluxConfig {
   }
 
   // Environment variable overrides
-  if (process.env.FLUX_DEFAULT_PROVIDER) {
-    config.defaultProvider = process.env.FLUX_DEFAULT_PROVIDER as ProviderType;
+  if (process.env.WEAVE_DEFAULT_PROVIDER) {
+    config.defaultProvider = process.env.WEAVE_DEFAULT_PROVIDER as ProviderType;
   }
-  if (process.env.FLUX_DEFAULT_MODEL) {
-    config.defaultModel = process.env.FLUX_DEFAULT_MODEL;
+  if (process.env.WEAVE_DEFAULT_MODEL) {
+    config.defaultModel = process.env.WEAVE_DEFAULT_MODEL;
   }
 
   // Apply saved locale
@@ -111,10 +111,10 @@ export function loadConfig(): FluxConfig {
 /**
  * Save config back to config.yaml (partial update, preserves unknown keys).
  */
-export function saveConfig(updates: Partial<FluxConfig>): void {
+export function saveConfig(updates: Partial<WeaveConfig>): void {
   ensureDirs();
 
-  const configPath = join(FLUX_CONF_DIR, 'config.yaml');
+  const configPath = join(WEAVE_CONF_DIR, 'config.yaml');
   const existing = existsSync(configPath)
     ? parseYaml(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
     : {};
@@ -127,7 +127,7 @@ export function saveConfig(updates: Partial<FluxConfig>): void {
  * Load all personas from the personas directory.
  */
 export async function loadPersonas(): Promise<Map<string, Persona>> {
-  const personasDir = join(FLUX_CONF_DIR, 'personas');
+  const personasDir = join(WEAVE_CONF_DIR, 'personas');
   const personas = new Map<string, Persona>();
 
   if (!existsSync(personasDir)) {
@@ -151,7 +151,7 @@ export async function loadPersonas(): Promise<Map<string, Persona>> {
  * Save a persona to the personas directory.
  */
 export async function savePersona(persona: Persona): Promise<void> {
-  const dir = join(FLUX_CONF_DIR, 'personas');
+  const dir = join(WEAVE_CONF_DIR, 'personas');
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, `${persona.name}.yaml`),
@@ -164,7 +164,7 @@ export async function savePersona(persona: Persona): Promise<void> {
  * Ensure config directories exist.
  */
 export function ensureDirs(): void {
-  for (const dir of [FLUX_CONF_DIR, join(FLUX_CONF_DIR, 'personas'), DEFAULT_SESSION_DIR, AGENTS_DIR]) {
+  for (const dir of [WEAVE_CONF_DIR, join(WEAVE_CONF_DIR, 'personas'), DEFAULT_SESSION_DIR, AGENTS_DIR]) {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
@@ -172,7 +172,7 @@ export function ensureDirs(): void {
 }
 
 /**
- * Load all agent configs from ~/.flux/agents/.
+ * Load all agent configs from ~/.weave/agents/.
  * Each file is a single YAML describing one AgentConfig.
  */
 export async function loadAgentConfigs(): Promise<Map<string, AgentConfig>> {
@@ -223,7 +223,7 @@ export async function loadAgentConfigs(): Promise<Map<string, AgentConfig>> {
 }
 
 /**
- * Save an agent config to ~/.flux/agents/.
+ * Save an agent config to ~/.weave/agents/.
  */
 export async function saveAgentConfig(config: AgentConfig): Promise<void> {
   await mkdir(AGENTS_DIR, { recursive: true });

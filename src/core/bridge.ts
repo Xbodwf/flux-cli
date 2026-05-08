@@ -8,7 +8,7 @@ type BridgeEventListener = (msg: BridgeMessage) => void;
  * Bridge — multi-agent coordination bus.
  *
  * The Bridge enables agents to communicate with each other, not just
- * with the user. This is Flux's primary innovation over existing AI CLI tools.
+ * with the user. This is Weave's primary innovation over existing AI CLI tools.
  *
  * Three communication modes:
  * - Direct: agent-to-agent (e.g., Architect → Coder)

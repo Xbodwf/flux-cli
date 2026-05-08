@@ -18,6 +18,8 @@ import { t } from '../i18n/index.js';
 import { loadConfig, saveConfig } from '../config/loader.js';
 import { writeSession, readSession, listSessions, getSessionPath } from '../session/jsonl.js';
 import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { authorizer } from '../core/auth.js';
+import { promptForAuthDecision } from './prompt-auth.js';
 
 // ─── State persistence across unmount/remount cycles ─────────────
 
@@ -146,6 +148,13 @@ function ReplApp({
           } else if (entry.role === 'assistant') {
             addChatMessage('assistant', content, entry.agentId || 'assistant', undefined, [], null);
           }
+        } else if (entry.type === 'tool_call' && entry.toolCall) {
+          addLine('tool_call', entry.toolCall.name, { args: entry.toolCall.args });
+        } else if (entry.type === 'tool_result' && entry.toolResult) {
+          addLine('tool_result', entry.toolCall?.name || 'tool', {
+            fullContent: entry.toolResult.content.map(c => c.data).join('\n'),
+            isError: entry.toolResult.isError || false,
+          });
         } else if (entry.type === 'system_event') {
           if (entry.event !== 'scanner_routing') {
             addLine('system', `[event] ${entry.event}`);
@@ -159,8 +168,8 @@ function ReplApp({
 
   // ─── Auto-save timer ──────────────────────────────────────────
   useEffect(() => {
-    const fluxConfig = loadConfig();
-    const interval = fluxConfig.autoSaveInterval || 0;
+    const weaveConfig = loadConfig();
+    const interval = weaveConfig.autoSaveInterval || 0;
     if (interval <= 0) return;
 
     const timer = setInterval(async () => {
@@ -168,7 +177,7 @@ function ReplApp({
         const currentAgent = agentManager.getDefaultAgent();
         if (currentAgent && currentAgent.getState().session.length > 0) {
           await writeSession(
-            join(homedir(), '.flux', 'sessions', 'autosave.jsonl'),
+            join(homedir(), '.weave', 'sessions', 'autosave.jsonl'),
             currentAgent.getState().session,
             false,
           );
@@ -353,6 +362,34 @@ function ReplApp({
       });
     };
 
+    // Helper: save tool call to the default agent's session (uses event.agentId, not currentAgentId)
+    const saveToolCallToSession = (agentId: string, toolCall: import('../core/types.js').ToolCall) => {
+      const defaultAgent = agentManager.getDefaultAgent();
+      if (!defaultAgent) return;
+      defaultAgent.addSessionEntry({
+        t: Date.now(),
+        type: 'tool_call' as const,
+        agentId,
+        toolCall,
+      });
+    };
+
+    // Helper: save tool result to the default agent's session
+    const saveToolResultToSession = (
+      agentId: string, toolCallId: string, toolName: string, toolArgs: unknown,
+      toolResult: import('../core/types.js').ToolResult,
+    ) => {
+      const defaultAgent = agentManager.getDefaultAgent();
+      if (!defaultAgent) return;
+      defaultAgent.addSessionEntry({
+        t: Date.now(),
+        type: 'tool_result' as const,
+        agentId,
+        toolCall: { id: toolCallId, name: toolName, args: toolArgs },
+        toolResult,
+      });
+    };
+
     // Helper: check queue, save to session, abort, and start new generation
     const handleQueueAndRestart = async (): Promise<boolean> => {
       const queued = userMessageQueueRef.current;
@@ -394,8 +431,17 @@ function ReplApp({
 
             // Track agent identity
             if (event.agentId) {
+              // Flush any pending tool calls from previous agent before switching
+              if (currentAgentId !== event.agentId && currentToolCalls.length > 0) {
+                flushParagraph('');
+              }
               currentAgentId = event.agentId;
               currentAgentName = resolveAgentName(event.agentId);
+            }
+
+            // If tool calls accumulated without text, flush them as a separate message now
+            if (currentToolCalls.length > 0) {
+              flushParagraph('');
             }
 
             // Accumulate into paragraph buffer
@@ -436,6 +482,10 @@ function ReplApp({
               name: event.toolCall.name,
               args: event.toolCall.args,
             });
+            // Render tool call in real-time
+            addLine('tool_call', event.toolCall.name, { args: event.toolCall.args });
+            // Save to default agent's session (in order with other entries)
+            saveToolCallToSession(event.agentId, event.toolCall);
             break;
           }
 
@@ -447,6 +497,15 @@ function ReplApp({
                 isError: event.toolResult.isError || false,
               };
             }
+            // Show tool result in real-time
+            addLine('tool_result', tc?.name || 'tool', {
+              fullContent: event.toolResult.content.map(c => c.data).join('\n'),
+              isError: event.toolResult.isError,
+            });
+            // Save to default agent's session (in order with other entries)
+            const tcName = tc?.name || '';
+            const tcArgs = tc?.args || {};
+            saveToolResultToSession(event.agentId, event.toolCall, tcName, tcArgs, event.toolResult);
             break;
           }
 
@@ -641,7 +700,7 @@ function ReplApp({
       }
 
       case 'resume': {
-        const autosavePath = join(homedir(), '.flux', 'sessions', 'autosave');
+        const autosavePath = join(homedir(), '.weave', 'sessions', 'autosave');
         let entries: import('../core/types.js').SessionEntry[] = [];
         if (existsSync(autosavePath + '.jsonl')) {
           entries = await readSession(autosavePath, false);
@@ -651,22 +710,20 @@ function ReplApp({
           addLine('system', 'No autosaved session found.');
           break;
         }
-        const resumeAgent = agentManager.getDefaultAgent();
-        if (!resumeAgent) { addLine('error', t('index.no_agent')); break; }
-        const state = resumeAgent.getState();
-        state.session = entries;
-        resumeAgent.restoreState(state);
+        if (!agentManager.getDefaultAgent()) { addLine('error', t('index.no_agent')); break; }
+        // Propagate to all agents so context is available everywhere
+        agentManager.injectSessionToAllAgents(entries);
         const model = entries.find(e => e.model)?.model;
         if (model) {
-          resumeAgent.setModel(model);
+          agentManager.getDefaultAgent()!.setModel(model);
           saveConfig({ defaultModel: model });
         }
         setStatusInfo({
-          model: model || resumeAgent.getState().config.model,
-          agentName: resumeAgent.name,
+          model: model || agentManager.getDefaultAgent()!.getState().config.model,
+          agentName: agentManager.getDefaultAgent()!.name,
         });
         addLine('system', `Session resumed: ${entries.length} entries restored`);
-        _currentSessionPath = join(homedir(), '.flux', 'sessions', 'autosave.jsonl');
+        _currentSessionPath = join(homedir(), '.weave', 'sessions', 'autosave.jsonl');
         break;
       }
 
@@ -714,9 +771,8 @@ function ReplApp({
               addLine('system', `Session not found: ${name}`);
               break;
             }
-            const agentState = sessionAgent.getState();
-            agentState.session = entries;
-            sessionAgent.restoreState(agentState);
+            // Inject session into ALL agents so context is available everywhere
+            agentManager.injectSessionToAllAgents(entries);
             const model = entries.find(e => e.model)?.model;
             if (model) {
               sessionAgent.setModel(model);
@@ -730,7 +786,7 @@ function ReplApp({
             _currentSessionPath = path;
             addLine('system', `Session loaded: ${name} (${msgCount} messages, ${entries.length} entries)`);
 
-            // Render loaded entries into the display
+            // Render loaded entries into the display, including tool calls
             for (const entry of entries) {
               if (entry.type === 'message') {
                 const content = typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content);
@@ -739,6 +795,13 @@ function ReplApp({
                 } else if (entry.role === 'assistant') {
                   addChatMessage('assistant', content, entry.agentId || 'assistant', undefined, [], null);
                 }
+              } else if (entry.type === 'tool_call' && entry.toolCall) {
+                addLine('tool_call', entry.toolCall.name, { args: entry.toolCall.args });
+              } else if (entry.type === 'tool_result' && entry.toolResult) {
+                addLine('tool_result', entry.toolCall?.name || 'tool', {
+                  fullContent: entry.toolResult.content.map(c => c.data).join('\n'),
+                  isError: entry.toolResult.isError || false,
+                });
               } else if (entry.type === 'system_event') {
                 if (entry.event !== 'scanner_routing') {
                   addLine('system', `[event] ${entry.event}`);
@@ -753,6 +816,7 @@ function ReplApp({
             const agentState = sessionAgent.getState();
             agentState.session = [];
             sessionAgent.restoreState(agentState);
+            authorizer.clearSessionGrants();
             addLine('system', 'Started new session. Previous context cleared.');
             break;
           }
@@ -777,7 +841,7 @@ function ReplApp({
       const currentAgent = agentManager.getDefaultAgent();
       if (currentAgent && currentAgent.getState().session.length > 0) {
         const entries = currentAgent.getState().session;
-        const sessionDir = join(homedir(), '.flux', 'sessions');
+        const sessionDir = join(homedir(), '.weave', 'sessions');
         if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
         const path = _currentSessionPath || join(sessionDir, `session-${Date.now()}.jsonl`);
         const name = _currentSessionPath
@@ -787,7 +851,7 @@ function ReplApp({
         writeFileSync(path, data, 'utf-8');
         process.stdout.write(`\n\u2713 Session saved: ${name}\n`);
         if (!_currentSessionPath) {
-          process.stdout.write(`  To resume: flux session load ${name}\n`);
+          process.stdout.write(`  To resume: weave session load ${name}\n`);
         }
       }
     } catch { /* silent */ }
@@ -1113,8 +1177,14 @@ export async function startREPL(
     );
   };
 
+  // Wire up authorizer to prompt user via stdin when tools need permission
+  authorizer.onAuthNeeded = (req) => {
+    // Fire-and-forget: prompt runs async while tool handler awaits the auth promise
+    promptForAuthDecision(req).then((d) => authorizer.resolvePending(d));
+  };
+
   // Show initial banner via console (before Ink app renders)
-  process.stdout.write('Flux REPL\n');
+  process.stdout.write('Weave REPL\n');
   process.stdout.write('Type /help for commands\n');
   process.stdout.write('\u2500'.repeat(Math.min(process.stdout.columns || 60, 60)) + '\n');
 

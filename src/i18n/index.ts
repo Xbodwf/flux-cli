@@ -1,5 +1,5 @@
 /**
- * Flux internationalization module.
+ * Weave internationalization module.
  *
  * Supports English and Chinese. Auto-detects from LANG env var.
  * Use `t(key, params)` to get translated strings throughout the codebase.

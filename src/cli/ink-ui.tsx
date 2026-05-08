@@ -575,7 +575,7 @@ export function ChatMessageComponent({ message, allMessages }: {
   );
 }
 
-// ─── InkUI Class (public API, FluxUI-compatible) ─────────────────────
+// ─── InkUI Class (public API, WeaveUI-compatible) ─────────────────────
 
 export class InkUI {
   private inkInstance: Instance;
@@ -707,7 +707,7 @@ export class InkUI {
     }
   }
 
-  // ─── Public API (FluxUI-compatible) ──────────────────────────
+  // ─── Public API (WeaveUI-compatible) ──────────────────────────
 
   start(): void {
     // Ink is already rendering

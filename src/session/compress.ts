@@ -5,7 +5,7 @@ import { join, extname } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 
-const SESSION_DIR = join(homedir(), '.flux', 'sessions');
+const SESSION_DIR = join(homedir(), '.weave', 'sessions');
 
 /**
  * Compress a session file with gzip.

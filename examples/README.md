@@ -1,6 +1,6 @@
-# Flux CLI Examples
+# Weave CLI Examples
 
-This directory contains example files demonstrating various Flux CLI features.
+This directory contains example files demonstrating various Weave CLI features.
 
 ## Files
 

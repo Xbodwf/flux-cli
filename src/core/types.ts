@@ -183,13 +183,13 @@ export interface SystemEvent {
 
 // ─── Config ───────────────────────────────────────────────────
 
-export interface FluxConfig {
+export interface WeaveConfig {
   defaultProvider: ProviderType;
   defaultModel: string;
   providers: Partial<Record<ProviderType, ProviderConfig>>;
-  sessionDir: string;               // default: ~/.flux/sessions/
+  sessionDir: string;               // default: ~/.weave/sessions/
   sessionCompression: boolean;      // default: true
-  personasDir: string;              // default: ~/.flux_conf/personas/
+  personasDir: string;              // default: ~/.weave/personas/
   autoSaveInterval: number;         // seconds, default: 30
   shellConfirmRequired: boolean;    // default: true
   theme: 'light' | 'dark' | 'auto';

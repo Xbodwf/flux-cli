@@ -1,20 +1,39 @@
 {
-  "name": "flux-cli",
+  "name": "weave-cli",
   "version": "0.1.0",
-  "description": "Multi-agent AI CLI with bridge coordination",
+  "description": "Multi-agent AI CLI with bridge coordination — weave agents together for collaborative problem-solving",
   "type": "module",
   "bin": {
-    "flux": "./bin/flux.js"
+    "weave": "./bin/weave.js"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "src/static/",
+    "src/persona/builtin/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -r src/static dist/static && cp -r src/persona/builtin dist/persona/",
     "dev": "tsx src/index.ts",
-    "start": "node bin/flux.js"
+    "start": "node bin/weave.js",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@google/generative-ai": "^0.21.0",
-    "@types/react": "^19.2.14",
     "chalk": "^5.6.2",
     "highlight.js": "^11.11.1",
     "ink": "^7.0.2",
@@ -27,14 +46,28 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "bugs": {
+    "url": ""
+  },
+  "homepage": "",
   "keywords": [
     "ai",
     "cli",
     "multi-agent",
-    "llm"
+    "llm",
+    "multi-agent-system",
+    "agent-coordination"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -3,7 +3,7 @@ import type { StreamEvent, ToolDefinition, Message } from '../core/types.js';
 /**
  * LLM Provider interface.
  *
- * Every LLM backend implements this interface, allowing Flux to
+ * Every LLM backend implements this interface, allowing Weave to
  * swap models transparently. The core primitive is `chat()` which
  * returns an async iterable of stream events.
  */
@@ -43,7 +43,7 @@ export abstract class LLMProvider {
 
   /**
    * Validate that the provider can make a successful API call.
-   * Useful for startup health checks and `flux doctor`.
+   * Useful for startup health checks and `weave doctor`.
    */
   abstract healthCheck(): Promise<{ ok: boolean; error?: string }>;
 

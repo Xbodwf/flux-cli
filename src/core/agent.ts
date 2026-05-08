@@ -12,6 +12,7 @@ import { EventBus } from './event-bus.js';
 import { buildSystemPrompt } from './prompt-loader.js';
 import { LLMProvider, ChatOptions } from '../llm/base.js';
 import { ToolRegistry } from '../tools/registry.js';
+import { setCurrentAgentName } from './exec-context.js';
 
 export type AgentChatEvent =
   | { type: 'text_delta'; content: string }
@@ -21,7 +22,7 @@ export type AgentChatEvent =
   | { type: 'error'; content: string };
 
 /**
- * Agent — the fundamental execution unit in Flux.
+ * Agent — the fundamental execution unit in Weave.
  *
  * Each agent is an independent actor with its own LLM provider,
  * persona, tool registry, and conversation session. Agents can
@@ -236,6 +237,9 @@ export class Agent {
     }
 
     this.bus.emit('tool:called', { agentId: this.id, toolCall } as any);
+
+    // Set execution context so tool handlers can identify the calling agent
+    setCurrentAgentName(this.config.name);
 
     try {
       const result = await tool.handler(toolCall.args);

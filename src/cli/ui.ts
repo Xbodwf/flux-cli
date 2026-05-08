@@ -12,7 +12,7 @@ import { Spinner } from './spinner.js';
 import { t } from '../i18n/index.js';
 
 /**
- * FluxUI — high-level UI manager for the REPL.
+ * WeaveUI — high-level UI manager for the REPL.
  *
  * Manages:
  * - Output area (scrollable message history)
@@ -29,7 +29,7 @@ export interface StatusBarInfo {
   agentName?: string;
 }
 
-export class FluxUI {
+export class WeaveUI {
   private spinner = new Spinner();
   private statusInfo: StatusBarInfo | null = null;
   private statusInterval: ReturnType<typeof setInterval> | null = null;

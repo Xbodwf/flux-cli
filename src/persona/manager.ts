@@ -5,14 +5,14 @@ import { homedir } from 'node:os';
 import type { Persona } from '../core/types.js';
 
 const BUILTIN_PERSONAS_DIR = new URL('./builtin/', import.meta.url).pathname;
-const CUSTOM_PERSONAS_DIR = join(homedir(), '.flux_conf', 'personas');
+const CUSTOM_PERSONAS_DIR = join(homedir(), '.weave', 'personas');
 
 /**
  * PersonaManager — loads and manages agent personalities.
  *
  * Loads from two sources:
- * 1. Built-in personas shipped with Flux (src/persona/builtin/)
- * 2. Custom personas from ~/.flux_conf/personas/
+ * 1. Built-in personas shipped with Weave (src/persona/builtin/)
+ * 2. Custom personas from ~/.weave/personas/
  *
  * Custom personas override built-in ones with the same name.
  */
